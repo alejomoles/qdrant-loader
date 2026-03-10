@@ -1,6 +1,7 @@
 """Main orchestrator for the ingestion pipeline."""
 
 from qdrant_loader.config import Settings, SourcesConfig
+from qdrant_loader.connectors.localfile.config import LocalFileConfig
 from qdrant_loader.connectors.confluence import ConfluenceConnector
 from qdrant_loader.connectors.git import GitConnector
 from qdrant_loader.connectors.jira import JiraConnector
@@ -48,6 +49,24 @@ class PipelineOrchestrator:
         self.components = components
         self.project_manager = project_manager
 
+    def _build_sources_config_from_db(self, project_id: str) -> SourcesConfig:
+        from pathlib import Path
+        from pydantic import AnyUrl
+
+        upload_path = Path("manuals").resolve() / project_id
+        base_url = AnyUrl(f"file://{upload_path}")
+
+        localfile_cfg = LocalFileConfig(
+            source_type="localfile",
+            source=project_id,
+            base_url=base_url,
+            enable_file_conversion=True,
+            include_paths=["*.pdf"],
+            exclude_paths=[],
+            file_types=[],
+        )
+        return SourcesConfig(localfile={project_id: localfile_cfg})
+
     async def process_documents(
         self,
         sources_config: SourcesConfig | None = None,
@@ -56,63 +75,60 @@ class PipelineOrchestrator:
         project_id: str | None = None,
         force: bool = False,
     ) -> list[Document]:
-        """Main entry point for document processing.
-
-        Args:
-            sources_config: Sources configuration to use (for backward compatibility)
-            source_type: Filter by source type
-            source: Filter by specific source name
-            project_id: Process documents for a specific project
-            force: Force processing of all documents, bypassing change detection
-
-        Returns:
-            List of processed documents
-        """
+        """Main entry point for document processing."""
         logger.info("🚀 Starting document ingestion")
 
         try:
-            # Determine sources configuration to use
             if sources_config:
-                # Use provided sources config (backward compatibility)
+                # Backward-compatible path: caller provided explicit config
                 logger.debug("Using provided sources configuration")
                 filtered_config = self.components.source_filter.filter_sources(
                     sources_config, source_type, source
                 )
                 current_project_id = None
+
             elif project_id:
-                # Use project-specific sources configuration
                 if not self.project_manager:
                     raise ValueError(
                         "Project manager not available for project-specific processing"
                     )
 
                 project_context = self.project_manager.get_project_context(project_id)
-                if (
-                    not project_context
-                    or not project_context.config
-                    or not project_context.config.sources
-                ):
-                    raise ValueError(
-                        f"Project '{project_id}' not found or has no configuration"
+                if not project_context:
+                    raise ValueError(f"Project '{project_id}' not found")
+
+                if project_context.config and project_context.config.sources:
+                    # Config-seeded project: use its YAML-derived SourcesConfig
+                    logger.debug(
+                        "Using YAML config sources for project: %s", project_id
+                    )
+                    project_sources_config = project_context.config.sources
+                else:
+                    # DB-only project (created via API): synthesise a SourcesConfig
+                    logger.info(
+                        "Project '%s' has no YAML config — building SourcesConfig "
+                        "from database/upload directory",
+                        project_id,
+                    )
+                    project_sources_config = self._build_sources_config_from_db(
+                        project_id
                     )
 
-                logger.debug(f"Using project configuration for project: {project_id}")
-                project_sources_config = project_context.config.sources
                 filtered_config = self.components.source_filter.filter_sources(
                     project_sources_config, source_type, source
                 )
                 current_project_id = project_id
+
             else:
-                # Process all projects
+                # No project specified — process all projects
                 if not self.project_manager:
                     raise ValueError(
                         "Project manager not available and no sources configuration provided"
                     )
-
                 logger.debug("Processing all projects")
                 return await self._process_all_projects(source_type, source, force)
 
-            # Check if filtered config is empty
+            # Bail early if the filter left nothing to do
             if source_type and not any(
                 [
                     filtered_config.git,
@@ -124,7 +140,6 @@ class PipelineOrchestrator:
             ):
                 raise ValueError(f"No sources found for type '{source_type}'")
 
-            # Collect documents from all sources
             documents = await self._collect_documents_from_sources(
                 filtered_config, current_project_id
             )
@@ -133,37 +148,33 @@ class PipelineOrchestrator:
                 logger.info("✅ No documents found from sources")
                 return []
 
-            # Detect changes in documents (bypass if force=True)
             if force:
                 logger.warning(
-                    f"🔄 Force mode enabled: bypassing change detection, processing all {len(documents)} documents"
+                    "🔄 Force mode: bypassing change detection, processing all %d documents",
+                    len(documents),
                 )
             else:
                 documents = await self._detect_document_changes(
                     documents, filtered_config, current_project_id
                 )
-
                 if not documents:
                     logger.info("✅ No new or updated documents to process")
                     return []
 
-            # Process documents through the pipeline
-            result = await self.components.document_pipeline.process_documents(
-                documents
-            )
+            result = await self.components.document_pipeline.process_documents(documents)
 
-            # Update document states for successfully processed documents
             await self._update_document_states(
                 documents, result.successfully_processed_documents, current_project_id
             )
 
             logger.info(
-                f"✅ Ingestion completed: {result.success_count} chunks processed successfully"
+                "✅ Ingestion completed: %d chunks processed successfully",
+                result.success_count,
             )
             return documents
 
         except Exception as e:
-            logger.error(f"❌ Pipeline orchestration failed: {e}", exc_info=True)
+            logger.error("❌ Pipeline orchestration failed: %s", e, exc_info=True)
             raise
 
     async def _process_all_projects(
@@ -178,31 +189,25 @@ class PipelineOrchestrator:
 
         all_documents = []
         project_ids = self.project_manager.list_project_ids()
+        logger.info("Processing %d projects", len(project_ids))
 
-        logger.info(f"Processing {len(project_ids)} projects")
-
-        for project_id in project_ids:
+        for pid in project_ids:
             try:
-                logger.debug(f"Processing project: {project_id}")
-                project_documents = await self.process_documents(
-                    project_id=project_id,
+                logger.debug("Processing project: %s", pid)
+                docs = await self.process_documents(
+                    project_id=pid,
                     source_type=source_type,
                     source=source,
                     force=force,
                 )
-                all_documents.extend(project_documents)
-                logger.debug(
-                    f"Processed {len(project_documents)} documents from project: {project_id}"
-                )
+                all_documents.extend(docs)
+                logger.debug("Processed %d documents from project: %s", len(docs), pid)
             except Exception as e:
-                logger.error(
-                    f"Failed to process project {project_id}: {e}", exc_info=True
-                )
-                # Continue processing other projects
+                logger.error("Failed to process project %s: %s", pid, e, exc_info=True)
                 continue
 
         logger.info(
-            f"Completed processing all projects: {len(all_documents)} total documents"
+            "Completed processing all projects: %d total documents", len(all_documents)
         )
         return all_documents
 
@@ -212,50 +217,44 @@ class PipelineOrchestrator:
         """Collect documents from all configured sources."""
         documents = []
 
-        # Process each source type with project context
         if filtered_config.confluence:
-            confluence_docs = (
+            documents.extend(
                 await self.components.source_processor.process_source_type(
                     filtered_config.confluence, ConfluenceConnector, "Confluence"
                 )
             )
-            documents.extend(confluence_docs)
-
         if filtered_config.git:
-            git_docs = await self.components.source_processor.process_source_type(
-                filtered_config.git, GitConnector, "Git"
+            documents.extend(
+                await self.components.source_processor.process_source_type(
+                    filtered_config.git, GitConnector, "Git"
+                )
             )
-            documents.extend(git_docs)
-
         if filtered_config.jira:
-            jira_docs = await self.components.source_processor.process_source_type(
-                filtered_config.jira, JiraConnector, "Jira"
+            documents.extend(
+                await self.components.source_processor.process_source_type(
+                    filtered_config.jira, JiraConnector, "Jira"
+                )
             )
-            documents.extend(jira_docs)
-
         if filtered_config.publicdocs:
-            publicdocs_docs = (
+            documents.extend(
                 await self.components.source_processor.process_source_type(
                     filtered_config.publicdocs, PublicDocsConnector, "PublicDocs"
                 )
             )
-            documents.extend(publicdocs_docs)
-
         if filtered_config.localfile:
-            localfile_docs = await self.components.source_processor.process_source_type(
-                filtered_config.localfile, LocalFileConnector, "LocalFile"
+            documents.extend(
+                await self.components.source_processor.process_source_type(
+                    filtered_config.localfile, LocalFileConnector, "LocalFile"
+                )
             )
-            documents.extend(localfile_docs)
 
-        # Inject project metadata into documents if project context is available
         if project_id and self.project_manager:
             for document in documents:
-                enhanced_metadata = self.project_manager.inject_project_metadata(
+                document.metadata = self.project_manager.inject_project_metadata(
                     project_id, document.metadata
                 )
-                document.metadata = enhanced_metadata
 
-        logger.info(f"📄 Collected {len(documents)} documents from all sources")
+        logger.info("📄 Collected %d documents from all sources", len(documents))
         return documents
 
     async def _detect_document_changes(
@@ -264,35 +263,30 @@ class PipelineOrchestrator:
         filtered_config: SourcesConfig,
         project_id: str | None = None,
     ) -> list[Document]:
-        """Detect changes in documents and return only new/updated ones."""
+        """Detect changes and return only new/updated documents."""
         if not documents:
             return []
 
-        logger.debug(f"Starting change detection for {len(documents)} documents")
+        logger.debug("Starting change detection for %d documents", len(documents))
 
         try:
-            # Ensure state manager is initialized before use
             if not self.components.state_manager._initialized:
-                logger.debug("Initializing state manager for change detection")
                 await self.components.state_manager.initialize()
 
             async with StateChangeDetector(
                 self.components.state_manager
             ) as change_detector:
-                changes = await change_detector.detect_changes(
-                    documents, filtered_config
-                )
-
+                changes = await change_detector.detect_changes(documents, filtered_config)
                 logger.info(
-                    f"🔍 Change detection: {len(changes['new'])} new, "
-                    f"{len(changes['updated'])} updated, {len(changes['deleted'])} deleted"
+                    "🔍 Change detection: %d new, %d updated, %d deleted",
+                    len(changes["new"]),
+                    len(changes["updated"]),
+                    len(changes["deleted"]),
                 )
-
-                # Return new and updated documents
                 return changes["new"] + changes["updated"]
 
         except Exception as e:
-            logger.error(f"Error during change detection: {e}", exc_info=True)
+            logger.error("Error during change detection: %s", e, exc_info=True)
             raise
 
     async def _update_document_states(
@@ -307,12 +301,11 @@ class PipelineOrchestrator:
         ]
 
         logger.debug(
-            f"Updating document states for {len(successfully_processed_docs)} documents"
+            "Updating document states for %d documents",
+            len(successfully_processed_docs),
         )
 
-        # Ensure state manager is initialized before use
         if not self.components.state_manager._initialized:
-            logger.debug("Initializing state manager for document state updates")
             await self.components.state_manager.initialize()
 
         for doc in successfully_processed_docs:
@@ -320,6 +313,6 @@ class PipelineOrchestrator:
                 await self.components.state_manager.update_document_state(
                     doc, project_id
                 )
-                logger.debug(f"Updated document state for {doc.id}")
+                logger.debug("Updated document state for %s", doc.id)
             except Exception as e:
-                logger.error(f"Failed to update document state for {doc.id}: {e}")
+                logger.error("Failed to update document state for %s: %s", doc.id, e)
