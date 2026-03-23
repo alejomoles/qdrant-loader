@@ -60,6 +60,15 @@ class TestLocalFileFileProcessor:
 
         return file_path
 
+    def test_default_max_file_size(self):
+        """Test that the default max_file_size is 50MB (52428800 bytes)."""
+        config = LocalFileConfig(
+            source_type="localfile",
+            source="test_default",
+            base_url=AnyUrl(f"file://{self.temp_dir}"),
+        )
+        assert config.max_file_size == 52428800
+
     def test_init(self):
         """Test LocalFileFileProcessor initialization."""
         assert self.processor.config is self.base_config

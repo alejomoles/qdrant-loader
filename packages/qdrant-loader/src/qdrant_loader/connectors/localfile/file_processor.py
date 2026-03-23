@@ -149,7 +149,9 @@ class LocalFileFileProcessor:
 
             file_size = os.path.getsize(file_path)
             if file_size > self.config.max_file_size:
-                self.logger.debug(f"Skipping {rel_path}: exceeds max file size")
+                self.logger.warning(
+                    f"Skipping {rel_path}: exceeds max file size ({file_size} > {self.config.max_file_size})"
+                )
                 return False
 
             if not self.config.include_paths:

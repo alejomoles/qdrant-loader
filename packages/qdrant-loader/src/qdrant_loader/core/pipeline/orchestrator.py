@@ -64,6 +64,7 @@ class PipelineOrchestrator:
             include_paths=["*.pdf"],
             exclude_paths=[],
             file_types=[],
+            max_file_size=52428800,  # 50MB
         )
         return SourcesConfig(localfile={project_id: localfile_cfg})
 

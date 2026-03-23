@@ -20,7 +20,7 @@ class LocalFileConfig(SourceConfig):
         default_factory=list, description="File types to process"
     )
     max_file_size: int = Field(
-        default=1048576, description="Maximum file size in bytes"
+        default=52428800, description="Maximum file size in bytes"
     )
 
     @field_validator("base_url")
