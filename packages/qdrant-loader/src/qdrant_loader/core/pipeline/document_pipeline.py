@@ -38,18 +38,34 @@ class DocumentPipeline:
         start_time = time.time()
 
         try:
-            # Step 1: Chunk documents
+            # Step 1: Chunk documents (lazy async iterator - chunking happens when consumed)
             logger.info("🔄 Starting chunking phase...")
             chunking_start = time.time()
             chunks_iter = self.chunking_worker.process_documents(documents)
 
-            # Step 2: Generate embeddings
-            logger.info("🔄 Chunking completed, transitioning to embedding phase...")
+            # Note: The iterator is lazy - actual chunking happens when consumed.
+            # We need to fully consume the iterator to complete chunking before moving to embedding.
+
+            # Consume the chunking iterator - this is when actual chunking happens
+            chunks_list = []
+            async for chunk in chunks_iter:
+                chunks_list.append(chunk)
+
             chunking_duration = time.time() - chunking_start
             logger.info(f"⏱️ Chunking phase took {chunking_duration:.2f} seconds")
+            logger.info(f"🔄 Chunking completed: {len(chunks_list)} chunks generated")
 
+            # Step 2: Generate embeddings
+            logger.info("🔄 Starting embedding generation...")
             embedding_start = time.time()
-            embedded_chunks_iter = self.embedding_worker.process_chunks(chunks_iter)
+
+            async def chunks_async_iter():
+                for chunk in chunks_list:
+                    yield chunk
+
+            embedded_chunks_iter = self.embedding_worker.process_chunks(
+                chunks_async_iter()
+            )
 
             # Step 3: Upsert to Qdrant
             logger.info("🔄 Embedding phase ready, starting upsert phase...")
