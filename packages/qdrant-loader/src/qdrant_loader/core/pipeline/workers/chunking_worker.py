@@ -237,5 +237,5 @@ class ChunkingWorker(BaseWorker):
 
         # Increased maximum timeout to handle complex documents
         return min(
-            adaptive_timeout, 600.0
-        )  # 10 minute maximum (increased from 5 minutes)
+            adaptive_timeout, 1200.0
+        )  # 20 minute maximum (increased from 10 minutes)
