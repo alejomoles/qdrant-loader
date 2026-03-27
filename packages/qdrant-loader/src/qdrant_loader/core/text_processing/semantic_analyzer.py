@@ -1,9 +1,11 @@
 """Semantic analysis module for text processing."""
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import spacy
 from gensim import corpora
 from gensim.models import LdaModel
@@ -31,9 +33,9 @@ class SemanticAnalyzer:
 
     def __init__(
         self,
-        spacy_model: str = "en_core_web_md",
-        num_topics: int = 5,
-        passes: int = 10,
+        spacy_model: str = "en_core_web_lg",
+        num_topics: int = 10,
+        passes: int = 20,
         min_topic_freq: int = 2,
     ):
         """Initialize the semantic analyzer.
@@ -62,6 +64,9 @@ class SemanticAnalyzer:
         # Initialize LDA model
         self.lda_model = None
         self.dictionary = None
+
+        # Flag to track if corpus has been trained for coherent topics
+        self._is_trained = False
 
         # Cache for processed documents
         self._doc_cache = {}
@@ -118,6 +123,262 @@ class SemanticAnalyzer:
             self._doc_cache[doc_id] = result
 
         return result
+
+    def train_corpus(self, texts: list[str]) -> None:
+        """Train LDA model on entire corpus for coherent cross-chunk topics.
+
+        This method trains a single LDA model on all texts, ensuring that
+        topic distributions are coherent across the entire document.
+
+        Args:
+            texts: List of text strings to train on
+        """
+        if not texts:
+            self.logger.warning("No texts provided for corpus training")
+            return
+
+        self.logger.info(f"Training LDA model on {len(texts)} texts...")
+
+        try:
+            # Preprocess all texts
+            processed_texts = [preprocess_string(text) for text in texts]
+
+            # Filter out empty texts
+            processed_texts = [t for t in processed_texts if len(t) >= 5]
+
+            if not processed_texts:
+                self.logger.warning("No valid texts after preprocessing")
+                return
+
+            # Build dictionary from all texts
+            self.dictionary = corpora.Dictionary(processed_texts)
+
+            # Filter extremes: remove words that appear in < 5 docs or > 50% of docs
+            self.dictionary.filter_extremes(no_below=5, no_above=0.5)
+
+            # Create corpus
+            corpus = [self.dictionary.doc2bow(text) for text in processed_texts]
+
+            # Train LDA model once on entire corpus
+            self.lda_model = LdaModel(
+                corpus=corpus,
+                id2word=self.dictionary,
+                num_topics=min(self.num_topics, len(processed_texts)),
+                passes=self.passes,
+                random_state=42,
+                alpha="auto",
+                eta="auto",
+                per_word_topics=True,
+            )
+
+            self._is_trained = True
+            self.logger.info(
+                f"LDA model trained successfully with {self.num_topics} topics"
+            )
+
+        except Exception as e:
+            self.logger.warning(f"Corpus training failed: {e}", exc_info=True)
+            self._is_trained = False
+
+    def get_topics(self, text: str) -> list[dict[str, Any]]:
+        """Extract topics using trained LDA model (fast inference).
+
+        Uses the trained corpus model for coherent topic extraction.
+        If not trained, falls back to inline training.
+
+        Args:
+            text: Text to extract topics from
+
+        Returns:
+            List of topic dictionaries with terms and weights
+        """
+        if not self._is_trained or self.lda_model is None:
+            # Fallback to legacy behavior
+            return self._extract_topics(text)
+
+        try:
+            processed_text = preprocess_string(text)
+
+            if len(processed_text) < 5:
+                return [
+                    {
+                        "id": 0,
+                        "terms": [{"term": "general", "weight": 1.0}],
+                        "coherence": 0.5,
+                    }
+                ]
+
+            # Fast: apply trained model (no training)
+            bow = self.dictionary.doc2bow(processed_text)
+            topic_distributions = self.lda_model.get_document_topics(
+                bow, minimum_probability=0.01
+            )
+
+            # Format topics with terms
+            topics = []
+            for topic_id, prob in topic_distributions:
+                # Get top terms for this topic
+                topic_terms = self.lda_model.show_topic(topic_id, topn=10)
+                terms = [
+                    {"term": term, "weight": float(weight)}
+                    for term, weight in topic_terms
+                ]
+
+                topics.append(
+                    {
+                        "id": topic_id,
+                        "probability": float(prob),
+                        "terms": terms,
+                        "coherence": self._calculate_topic_coherence(terms),
+                    }
+                )
+
+            # Sort by probability
+            topics.sort(key=lambda x: x["probability"], reverse=True)
+
+            return topics if topics else self._get_fallback_topics()
+
+        except Exception as e:
+            self.logger.warning(f"Topic inference failed: {e}", exc_info=True)
+            return self._get_fallback_topics()
+
+    def get_entities_fast(self, text: str) -> list[dict[str, Any]]:
+        """Extract named entities without full semantic analysis.
+
+        Args:
+            text: Text to extract entities from
+
+        Returns:
+            List of entity dictionaries
+        """
+        try:
+            doc = self.nlp(text)
+            return self._extract_entities(doc)
+        except Exception as e:
+            self.logger.warning(f"Entity extraction failed: {e}", exc_info=True)
+            return []
+
+    def calculate_similarity(self, text1: str, text2: str) -> float:
+        """Calculate similarity between two texts using topic distributions.
+
+        Uses Jensen-Shannon divergence between topic distributions
+        for cross-document similarity.
+
+        Args:
+            text1: First text
+            text2: Second text
+
+        Returns:
+            Similarity score between 0 and 1
+        """
+        topics1 = self.get_topics(text1)
+        topics2 = self.get_topics(text2)
+
+        return self._topic_distribution_similarity(topics1, topics2)
+
+    def _topic_distribution_similarity(
+        self,
+        topics1: list[dict[str, Any]],
+        topics2: list[dict[str, Any]],
+    ) -> float:
+        """Calculate similarity between two topic distributions.
+
+        Uses Jensen-Shannon divergence.
+
+        Args:
+            topics1: First topic distribution
+            topics2: Second topic distribution
+
+        Returns:
+            Similarity score between 0 and 1
+        """
+        # Build probability distributions
+        all_topic_ids = set(t["id"] for t in topics1) | set(t["id"] for t in topics2)
+
+        dist1 = np.zeros(len(all_topic_ids))
+        dist2 = np.zeros(len(all_topic_ids))
+
+        topic_list = sorted(all_topic_ids)
+
+        for i, topic_id in enumerate(topic_list):
+            dist1[i] = next(
+                (
+                    t.get("probability", 0) or t.get("weight", 0)
+                    for t in topics1
+                    if t["id"] == topic_id
+                ),
+                0.0,
+            )
+            dist2[i] = next(
+                (
+                    t.get("probability", 0) or t.get("weight", 0)
+                    for t in topics2
+                    if t["id"] == topic_id
+                ),
+                0.0,
+            )
+
+        # Add small epsilon to avoid zeros
+        epsilon = 1e-10
+        dist1 = dist1 + epsilon
+        dist2 = dist2 + epsilon
+
+        # Normalize
+        dist1 = dist1 / dist1.sum()
+        dist2 = dist2 / dist2.sum()
+
+        # Jensen-Shannon divergence
+        middle = 0.5 * (dist1 + dist2)
+
+        # KL divergence
+        kl1 = np.sum(dist1 * np.log(dist1 / middle))
+        kl2 = np.sum(dist2 * np.log(dist2 / middle))
+
+        js_divergence = 0.5 * (kl1 + kl2)
+
+        # Convert to similarity (1 - normalized divergence)
+        similarity = 1.0 - math.sqrt(js_divergence / math.log(2))
+
+        return float(max(0.0, min(1.0, similarity)))
+
+    def _get_fallback_topics(self) -> list[dict[str, Any]]:
+        """Return fallback topics when extraction fails."""
+        return [
+            {
+                "id": 0,
+                "terms": [{"term": "general", "weight": 1.0}],
+                "coherence": 0.5,
+            }
+        ]
+
+    def _format_topics(
+        self, topic_distributions: list[tuple[int, float]]
+    ) -> list[dict[str, Any]]:
+        """Format topic distributions into readable format.
+
+        Args:
+            topic_distributions: List of (topic_id, probability) tuples
+
+        Returns:
+            List of formatted topic dictionaries
+        """
+        topics = []
+        for topic_id, prob in topic_distributions:
+            topic_terms = self.lda_model.show_topic(topic_id, topn=10)
+            terms = [
+                {"term": term, "weight": float(weight)} for term, weight in topic_terms
+            ]
+
+            topics.append(
+                {
+                    "id": topic_id,
+                    "probability": float(prob),
+                    "terms": terms,
+                    "coherence": self._calculate_topic_coherence(terms),
+                }
+            )
+
+        return topics
 
     def _extract_entities(self, doc: Doc) -> list[dict[str, Any]]:
         """Extract named entities with linking.

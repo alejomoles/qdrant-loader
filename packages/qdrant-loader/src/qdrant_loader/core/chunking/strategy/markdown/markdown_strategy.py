@@ -112,12 +112,17 @@ class MarkdownChunkingStrategy(BaseChunkingStrategy):
                 )
                 chunks_metadata = chunks_metadata[:max_chunks]
 
-            # Create chunk documents
+            # Phase 2: Train semantic model ONCE on all chunks for coherent topics
+            # This ensures cross-chunk topic coherence within the document
+            all_chunk_contents = [c["content"] for c in chunks_metadata]
+            self.chunk_processor.train_semantic_model(all_chunk_contents)
+
+            # Phase 3: Create chunk documents with fast topic inference
             chunked_docs = []
             for i, chunk_meta in enumerate(chunks_metadata):
                 chunk_content = chunk_meta["content"]
                 logger.debug(
-                    f"Processing chunk {i+1}/{len(chunks_metadata)}",
+                    f"Processing chunk {i + 1}/{len(chunks_metadata)}",
                     extra={
                         "chunk_size": len(chunk_content),
                         "section_type": chunk_meta.get("section_type", "unknown"),
@@ -133,7 +138,7 @@ class MarkdownChunkingStrategy(BaseChunkingStrategy):
                     )
                 chunk_meta["section_title"] = section_title
 
-                # 🔥 ENHANCED: Use hierarchical metadata extraction
+                # ENHANCED: Use hierarchical metadata extraction
                 enriched_metadata = (
                     self.metadata_extractor.extract_hierarchical_metadata(
                         chunk_content, chunk_meta, document
@@ -141,7 +146,7 @@ class MarkdownChunkingStrategy(BaseChunkingStrategy):
                 )
 
                 # Create chunk document using the chunk processor
-                # 🔥 FIX: Skip NLP for small documents or documents that might cause LDA issues
+                # Use fast topic inference with trained model for cross-chunk coherence
                 markdown_config = (
                     self.settings.global_config.chunking.strategies.markdown
                 )
@@ -152,6 +157,10 @@ class MarkdownChunkingStrategy(BaseChunkingStrategy):
                     or chunk_content.count("\n")
                     < markdown_config.min_line_count_for_nlp
                 )
+
+                # Use fast topic inference if model was trained (for coherence)
+                use_fast_topics = self.chunk_processor.is_trained and not skip_nlp
+
                 chunk_doc = self.chunk_processor.create_chunk_document(
                     original_doc=document,
                     chunk_content=chunk_content,
@@ -159,6 +168,7 @@ class MarkdownChunkingStrategy(BaseChunkingStrategy):
                     total_chunks=len(chunks_metadata),
                     chunk_metadata=enriched_metadata,
                     skip_nlp=skip_nlp,
+                    use_fast_topics=use_fast_topics,
                 )
 
                 logger.debug(

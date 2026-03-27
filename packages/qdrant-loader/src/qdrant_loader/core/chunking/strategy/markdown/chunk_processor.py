@@ -35,9 +35,35 @@ class ChunkProcessor:
         # Cache for processed chunks to avoid recomputation
         self._processed_chunks: dict[str, dict[str, Any]] = {}
 
+        # Track if semantic model has been trained for current document
+        self._is_trained_for_current_doc = False
+
         # Initialize thread pool for parallel processing
         max_workers = settings.global_config.chunking.strategies.markdown.max_workers
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+
+    def train_semantic_model(self, chunk_contents: list[str]) -> None:
+        """Train LDA model on all chunks for coherent cross-chunk topics.
+
+        This should be called once before processing all chunks in a document
+        to ensure coherent topic distributions across chunks.
+
+        Args:
+            chunk_contents: List of all chunk contents from a single document
+        """
+        if not chunk_contents:
+            return
+
+        logger.info(
+            f"Training semantic model on {len(chunk_contents)} chunks for coherent topics"
+        )
+        self.semantic_analyzer.train_corpus(chunk_contents)
+        self._is_trained_for_current_doc = True
+
+    @property
+    def is_trained(self) -> bool:
+        """Check if semantic model has been trained for current document."""
+        return self._is_trained_for_current_doc and self.semantic_analyzer._is_trained
 
     def process_chunk(
         self, chunk: str, chunk_index: int, total_chunks: int
@@ -91,6 +117,7 @@ class ChunkProcessor:
         total_chunks: int,
         chunk_metadata: dict[str, Any],
         skip_nlp: bool = False,
+        use_fast_topics: bool = False,
     ) -> Document:
         """Create a chunk document with enhanced metadata.
 
@@ -101,6 +128,7 @@ class ChunkProcessor:
             total_chunks: Total number of chunks
             chunk_metadata: Chunk-specific metadata
             skip_nlp: Whether to skip NLP processing
+            use_fast_topics: Use fast topic inference with trained model (recommended)
 
         Returns:
             Document representing the chunk
@@ -116,7 +144,7 @@ class ChunkProcessor:
             metadata=original_doc.metadata.copy(),
         )
 
-        # 🔥 FIX: Manually assign chunk ID (following pattern from other strategies)
+        # Manually assign chunk ID (following pattern from other strategies)
         chunk_doc.id = Document.generate_chunk_id(original_doc.id, chunk_index)
 
         # Add chunk-specific metadata
@@ -133,12 +161,39 @@ class ChunkProcessor:
 
         # Perform semantic analysis if not skipped
         if not skip_nlp:
-            semantic_results = self.process_chunk(
-                chunk_content, chunk_index, total_chunks
-            )
+            # Use fast topic inference if model has been trained
+            if use_fast_topics and self.is_trained:
+                semantic_results = self._process_chunk_fast(chunk_content)
+            else:
+                # Full analysis (existing behavior)
+                semantic_results = self.process_chunk(
+                    chunk_content, chunk_index, total_chunks
+                )
             chunk_doc.metadata.update(semantic_results)
 
         return chunk_doc
+
+    def _process_chunk_fast(self, chunk_content: str) -> dict[str, Any]:
+        """Process chunk using fast topic inference with trained model.
+
+        Args:
+            chunk_content: Content of the chunk
+
+        Returns:
+            Dictionary with topics and entities
+        """
+        # Fast topic inference using trained model
+        topics = self.semantic_analyzer.get_topics(chunk_content)
+
+        # Extract entities using fast method
+        entities = self.semantic_analyzer.get_entities_fast(chunk_content)
+
+        return {
+            "topics": topics,
+            "entities": entities,
+            "key_phrases": [],  # Can be added if needed
+            "document_similarity": {},  # Computed separately if needed
+        }
 
     def estimate_chunk_count(self, content: str) -> int:
         """Estimate the number of chunks that will be generated.

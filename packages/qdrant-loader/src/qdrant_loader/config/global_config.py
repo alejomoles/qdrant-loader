@@ -21,13 +21,13 @@ class SemanticAnalysisConfig(BaseConfig):
     """Configuration for semantic analysis."""
 
     num_topics: int = Field(
-        default=3, description="Number of topics to extract using LDA"
+        default=10, description="Number of topics to extract using LDA"
     )
 
-    lda_passes: int = Field(default=10, description="Number of passes for LDA training")
+    lda_passes: int = Field(default=20, description="Number of passes for LDA training")
 
     spacy_model: str = Field(
-        default="en_core_web_md",
+        default="en_core_web_lg",
         description="spaCy model to use for text processing. Options: en_core_web_sm (15MB, no vectors), en_core_web_md (50MB, 20k vectors), en_core_web_lg (750MB, 514k vectors)",
     )
 
