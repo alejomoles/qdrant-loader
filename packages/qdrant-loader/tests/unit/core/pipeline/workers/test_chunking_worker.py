@@ -406,7 +406,7 @@ class TestChunkingWorker:
 
         # Should be base timeout for large files (updated to match new implementation)
         assert timeout >= 240.0
-        assert timeout <= 600.0  # Capped at maximum
+        assert timeout <= 1200.0  # Capped at maximum
 
     def test_calculate_adaptive_timeout_very_large_file(self):
         """Test adaptive timeout calculation for very large files."""
@@ -416,7 +416,7 @@ class TestChunkingWorker:
 
         # Should be base timeout for very large files, capped at maximum (updated to match new implementation)
         assert timeout >= 360.0
-        assert timeout <= 600.0  # Capped at maximum
+        assert timeout <= 1200.0  # Capped at maximum
 
     def test_calculate_adaptive_timeout_html_file(self):
         """Test adaptive timeout calculation for HTML files."""
@@ -455,8 +455,8 @@ class TestChunkingWorker:
 
         timeout = self.worker._calculate_adaptive_timeout(document)
 
-        # Should be capped at 600 seconds (10 minutes) - updated to match new implementation
-        assert timeout == 600.0
+        # Should be capped at 1200 seconds (20 minutes) - updated to match new implementation
+        assert timeout == 1200.0
 
     def test_calculate_adaptive_timeout_size_factor_scaling(self):
         """Test that size factor scales correctly."""
@@ -477,5 +477,5 @@ class TestChunkingWorker:
         for i in range(len(timeouts) - 1):
             # Allow for some variation due to different base timeouts
             # but overall trend should be increasing
-            if timeouts[i + 1] < 600.0:  # Not at cap (updated to match new max)
+            if timeouts[i + 1] < 1200.0:  # Not at cap (updated to match new max)
                 assert timeouts[i + 1] >= timeouts[i] * 0.8  # Allow some variation

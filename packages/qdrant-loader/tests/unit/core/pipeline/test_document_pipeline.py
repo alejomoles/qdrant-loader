@@ -68,8 +68,18 @@ class TestDocumentPipeline:
         """Test successful document processing."""
         chunking_worker, embedding_worker, upsert_worker = mock_workers
 
-        # Mock the processing chain
-        chunks_iter = AsyncMock()
+        # Mock the processing chain - use a real async iterator pattern
+        mock_chunk = MagicMock()
+        mock_chunk.content = "test content"
+
+        async def mock_chunks_generator():
+            yield mock_chunk
+            yield mock_chunk
+            yield mock_chunk
+            yield mock_chunk
+            yield mock_chunk
+
+        chunks_iter = mock_chunks_generator()
         embedded_chunks_iter = AsyncMock()
 
         chunking_worker.process_documents.return_value = chunks_iter
@@ -88,7 +98,8 @@ class TestDocumentPipeline:
 
         # Verify the chain was called correctly
         chunking_worker.process_documents.assert_called_once_with(sample_documents)
-        embedding_worker.process_chunks.assert_called_once_with(chunks_iter)
+        # Verify process_chunks was called (with any async iterator)
+        embedding_worker.process_chunks.assert_called_once()
         upsert_worker.process_embedded_chunks.assert_called_once_with(
             embedded_chunks_iter
         )
@@ -255,8 +266,15 @@ class TestDocumentPipeline:
         """Test that appropriate logging occurs during processing."""
         chunking_worker, embedding_worker, upsert_worker = mock_workers
 
-        # Mock the processing chain
-        chunks_iter = AsyncMock()
+        # Mock the processing chain - use a real async iterator pattern
+        mock_chunk = MagicMock()
+        mock_chunk.content = "test content"
+
+        async def mock_chunks_generator():
+            yield mock_chunk
+            yield mock_chunk
+
+        chunks_iter = mock_chunks_generator()
         embedded_chunks_iter = AsyncMock()
 
         chunking_worker.process_documents.return_value = chunks_iter
@@ -281,10 +299,7 @@ class TestDocumentPipeline:
             "Processing 2 documents through pipeline" in msg for msg in log_messages
         )
         assert any("Starting chunking phase" in msg for msg in log_messages)
-        assert any(
-            "Chunking completed, transitioning to embedding phase" in msg
-            for msg in log_messages
-        )
+        assert any("Chunking completed:" in msg for msg in log_messages)
         assert any(
             "Embedding phase ready, starting upsert phase" in msg
             for msg in log_messages
