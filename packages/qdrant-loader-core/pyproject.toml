@@ -46,6 +46,9 @@ openai = [
 ollama = [
     "httpx>=0.24.0",
 ]
+google = [
+    "google-genai>=0.3.0",
+]
 
 [project.urls]
 Homepage = "https://qdrant-loader.net"

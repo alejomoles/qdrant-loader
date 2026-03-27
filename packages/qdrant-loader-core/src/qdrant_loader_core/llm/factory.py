@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
+from .providers.google_genai import GoogleGenAIProvider, GENAI_AVAILABLE
 from .providers.ollama import OllamaProvider
 from .providers.openai import OpenAIProvider
 
@@ -83,5 +84,18 @@ def create_provider(settings: LLMSettings) -> LLMProvider:
 
     if provider_name == "ollama" or (base_host in ("localhost", "127.0.0.1")):
         return OllamaProvider(settings)
+
+    if (
+        provider_name == "google"
+        or provider_name == "google_genai"
+        or provider_name == "gemini"
+        or "gemini" in provider_name
+    ):
+        if GENAI_AVAILABLE:
+            try:
+                return GoogleGenAIProvider(settings)
+            except Exception:
+                return _NoopProvider()
+        return _NoopProvider()
 
     return _NoopProvider()
